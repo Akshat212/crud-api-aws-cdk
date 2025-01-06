@@ -1,28 +1,64 @@
-#!/usr/bin/env python3
-import os
+from flask import Flask, request, jsonify
+from amazondax.AmazonDaxClient import AmazonDaxClient
+import boto3
 
-import aws_cdk as cdk
+app = Flask(__name__)
 
-from crud_api_aws_cdk.crud_api_aws_cdk_stack import CrudApiAwsCdkStack
+# Initialize DAX client
+dax_client = AmazonDaxClient(endpoint_urls=["dax-cluster-endpoint"])
+dynamodb = boto3.resource("dynamodb")
 
+@app.route("/tasks", methods=["POST"])
+def create_task():
+    data = request.json
+    task_id = data.get("taskId")
+    name = data.get("name")
+    description = data.get("description")
+    status = data.get("status", "pending")
 
-app = cdk.App()
-CrudApiAwsCdkStack(app, "CrudApiAwsCdkStack",
-    # If you don't specify 'env', this stack will be environment-agnostic.
-    # Account/Region-dependent features and context lookups will not work,
-    # but a single synthesized template can be deployed anywhere.
+    if status not in ["pending", "in-progress", "completed"]:
+        return jsonify({"error": "Invalid status value"}), 400
 
-    # Uncomment the next line to specialize this stack for the AWS Account
-    # and Region that are implied by the current CLI configuration.
+    item = {"taskId": task_id, "name": name, "description": description, "status": status}
 
-    #env=cdk.Environment(account=os.getenv('CDK_DEFAULT_ACCOUNT'), region=os.getenv('CDK_DEFAULT_REGION')),
+    table = dax_client.Table("TasksTable")  # Use DAX client
+    table.put_item(Item=item)
 
-    # Uncomment the next line if you know exactly what Account and Region you
-    # want to deploy the stack to. */
+    return jsonify({"message": "Task created", "task": item}), 201
 
-    #env=cdk.Environment(account='123456789012', region='us-east-1'),
+@app.route("/tasks/<task_id>", methods=["GET"])
+def get_task(task_id):
+    table = dax_client.Table("TasksTable")  # Use DAX client
+    response = table.get_item(Key={"taskId": task_id})
+    if "Item" not in response:
+        return jsonify({"error": "Task not found"}), 404
 
-    # For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html
+    return jsonify(response["Item"]), 200
+
+@app.route("/tasks/<task_id>", methods=["PUT"])
+def update_task(task_id):
+    data = request.json
+    status = data.get("status")
+    if status and status not in ["pending", "in-progress", "completed"]:
+        return jsonify({"error": "Invalid status value"}), 400
+
+    table = dax_client.Table("TasksTable")  # Use DAX client
+    response = table.update_item(
+        Key={"taskId": task_id},
+        UpdateExpression="set #n = :n, description = :d, #s = :s",
+        ExpressionAttributeNames={"#n": "name", "#s": "status"},
+        ExpressionAttributeValues={":n": data["name"], ":d": data["description"], ":s": status},
+        ReturnValues="UPDATED_NEW"
     )
 
-app.synth()
+    return jsonify({"message": "Task updated", "updated": response["Attributes"]}), 200
+
+@app.route("/tasks/<task_id>", methods=["DELETE"])
+def delete_task(task_id):
+    table = dax_client.Table("TasksTable")  # Use DAX client
+    table.delete_item(Key={"taskId": task_id})
+
+    return jsonify({"message": "Task deleted"}), 200
+
+if __name__ == "__main__":
+    app.run(debug=True)
